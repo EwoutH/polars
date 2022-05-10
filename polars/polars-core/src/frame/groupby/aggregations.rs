@@ -757,63 +757,41 @@ where
     ChunkedArray<T>: IntoSeries,
 {
     fn agg_list(&self, groups: &GroupsProxy) -> Series {
+        let ca = self.rechunk();
         match groups {
             GroupsProxy::Idx(groups) => {
                 let mut can_fast_explode = true;
-                let arr = match self.cont_slice() {
-                    Ok(values) => {
-                        let mut offsets = Vec::<i64>::with_capacity(groups.len() + 1);
-                        let mut length_so_far = 0i64;
-                        offsets.push(length_so_far);
+                let values = ca.cont_slice().unwrap();
 
-                        let mut list_values = Vec::<T::Native>::with_capacity(self.len());
-                        groups.iter().for_each(|(_, idx)| {
-                            let idx_len = idx.len();
-                            if idx_len == 0 {
-                                can_fast_explode = false;
-                            }
+                let mut offsets = Vec::<i64>::with_capacity(groups.len() + 1);
+                let mut length_so_far = 0i64;
+                offsets.push(length_so_far);
 
-                            length_so_far += idx_len as i64;
-                            // Safety:
-                            // group tuples are in bounds
-                            unsafe {
-                                list_values.extend(idx.iter().map(|idx| {
-                                    debug_assert!((*idx as usize) < values.len());
-                                    *values.get_unchecked(*idx as usize)
-                                }));
-                                // Safety:
-                                // we know that offsets has allocated enough slots
-                                offsets.push_unchecked(length_so_far);
-                            }
-                        });
-                        let array = PrimitiveArray::from_data(
-                            T::get_dtype().to_arrow(),
-                            list_values.into(),
-                            None,
-                        );
-                        let data_type =
-                            ListArray::<i64>::default_datatype(T::get_dtype().to_arrow());
-                        ListArray::<i64>::from_data(
-                            data_type,
-                            offsets.into(),
-                            Arc::new(array),
-                            None,
-                        )
+                let mut list_values = Vec::<T::Native>::with_capacity(ca.len());
+                groups.iter().for_each(|(_, idx)| {
+                    let idx_len = idx.len();
+                    if idx_len == 0 {
+                        can_fast_explode = false;
                     }
-                    _ => {
-                        let mut builder = ListPrimitiveChunkedBuilder::<T::Native>::new(
-                            self.name(),
-                            groups.len(),
-                            self.len(),
-                            self.dtype().clone(),
-                        );
-                        for idx in groups.all().iter() {
-                            let s = unsafe { self.take_unchecked(idx.into()).into_series() };
-                            builder.append_series(&s);
-                        }
-                        return builder.finish().into_series();
+
+                    length_so_far += idx_len as i64;
+                    // Safety:
+                    // group tuples are in bounds
+                    unsafe {
+                        list_values.extend(idx.iter().map(|idx| {
+                            debug_assert!((*idx as usize) < values.len());
+                            *values.get_unchecked(*idx as usize)
+                        }));
+                        // Safety:
+                        // we know that offsets has allocated enough slots
+                        offsets.push_unchecked(length_so_far);
                     }
-                };
+                });
+                let array =
+                    PrimitiveArray::from_data(T::get_dtype().to_arrow(), list_values.into(), None);
+                let data_type = ListArray::<i64>::default_datatype(T::get_dtype().to_arrow());
+                let arr =
+                    ListArray::<i64>::from_data(data_type, offsets.into(), Arc::new(array), None);
                 let mut ca = ListChunked::from_chunks(self.name(), vec![Arc::new(arr)]);
                 if can_fast_explode {
                     ca.set_fast_explode()
@@ -822,55 +800,31 @@ where
             }
             GroupsProxy::Slice(groups) => {
                 let mut can_fast_explode = true;
-                let arr = match self.cont_slice() {
-                    Ok(values) => {
-                        let mut offsets = Vec::<i64>::with_capacity(groups.len() + 1);
-                        let mut length_so_far = 0i64;
-                        offsets.push(length_so_far);
+                let values = ca.cont_slice().unwrap();
 
-                        let mut list_values = Vec::<T::Native>::with_capacity(self.len());
-                        groups.iter().for_each(|&[first, len]| {
-                            if len == 0 {
-                                can_fast_explode = false;
-                            }
+                let mut offsets = Vec::<i64>::with_capacity(groups.len() + 1);
+                let mut length_so_far = 0i64;
+                offsets.push(length_so_far);
 
-                            length_so_far += len as i64;
-                            list_values
-                                .extend_from_slice(&values[first as usize..(first + len) as usize]);
-                            unsafe {
-                                // Safety:
-                                // we know that offsets has allocated enough slots
-                                offsets.push_unchecked(length_so_far);
-                            }
-                        });
-                        let array = PrimitiveArray::from_data(
-                            T::get_dtype().to_arrow(),
-                            list_values.into(),
-                            None,
-                        );
-                        let data_type =
-                            ListArray::<i64>::default_datatype(T::get_dtype().to_arrow());
-                        ListArray::<i64>::from_data(
-                            data_type,
-                            offsets.into(),
-                            Arc::new(array),
-                            None,
-                        )
+                let mut list_values = Vec::<T::Native>::with_capacity(ca.len());
+                groups.iter().for_each(|&[first, len]| {
+                    if len == 0 {
+                        can_fast_explode = false;
                     }
-                    _ => {
-                        let mut builder = ListPrimitiveChunkedBuilder::<T::Native>::new(
-                            self.name(),
-                            groups.len(),
-                            self.len(),
-                            self.dtype().clone(),
-                        );
-                        for &[first, len] in groups {
-                            let s = self.slice(first as i64, len as usize).into_series();
-                            builder.append_series(&s);
-                        }
-                        return builder.finish().into_series();
+
+                    length_so_far += len as i64;
+                    list_values.extend_from_slice(&values[first as usize..(first + len) as usize]);
+                    unsafe {
+                        // Safety:
+                        // we know that offsets has allocated enough slots
+                        offsets.push_unchecked(length_so_far);
                     }
-                };
+                });
+                let array =
+                    PrimitiveArray::from_data(T::get_dtype().to_arrow(), list_values.into(), None);
+                let data_type = ListArray::<i64>::default_datatype(T::get_dtype().to_arrow());
+                let arr =
+                    ListArray::<i64>::from_data(data_type, offsets.into(), Arc::new(array), None);
                 let mut ca = ListChunked::from_chunks(self.name(), vec![Arc::new(arr)]);
                 if can_fast_explode {
                     ca.set_fast_explode()
